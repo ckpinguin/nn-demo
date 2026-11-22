@@ -134,7 +134,7 @@ GLOSSARY = [    # (pattern, symbol, meaning, formula, details)
      "Because its slope is 1 wherever the neuron is active, blame passes through without shrinking."),
 ]
 
-course = Course("Backpropagation, step by step", GLOSSARY, SLIDERS, __doc__)
+course = Course("Backpropagation, step by step", GLOSSARY, SLIDERS, __doc__, name="backprop_tutor")
 step, no = course.step, course.no
 
 
@@ -284,10 +284,34 @@ def code_of(function):
     return re.sub(r'\n\s*"""[^"]*"""', "", source, count=1)
 
 
-def code_box(t, left, top, width, code, title=None, marks=None, fontsize=11.5):
-    """Source code in a grey box below top, as high as it needs to be. marks: {line number: short note} in a
-    gutter on the left. Returns the figure y of the box's lower edge."""
+def mark_lines(code, marks):
+    """The line of every mark. marks: {a piece of text: short note}, where the text must appear in exactly one
+    line of the code. Returns {line number: short note}, counting from 1."""
     lines = code.split("\n")
+    found = {}
+    for text, note in marks.items():
+        numbers = [k + 1 for k, line in enumerate(lines) if text in line]
+        if len(numbers) != 1:
+            raise ValueError(f"code label {note!r}: {len(numbers)} lines contain {text!r}")
+        found[numbers[0]] = note
+    return found
+
+
+# The notes beside the code listings. Each one finds its line by a piece of the line's text, so the notes
+# move along when the code changes, and a note whose line was rewritten raises an error.
+FORWARD_MARKS = {"H = sigmoid(": "hidden layer", "p = sigmoid(": "output"}
+BACKPROP_MARKS = {"self.forward(X)": "forward", "e = p - y": "step 1", "D = np.outer": "steps 2 + 3",
+                  "return Net(": "step 4"}
+DEEP_MARKS = {"H = [X]": "forward", "D = (p - y)": "start", "for k in reversed": "backward", "dWs.insert": "knobs",
+              "D = (D @ Ws[k])": "blame back"}
+
+
+def code_box(t, left, top, width, code, title=None, marks=None, fontsize=11.5):
+    """Source code in a grey box below top, as high as it needs to be. marks: {a piece of a line's text: short
+    note}, the note goes into a gutter left of that line (see mark_lines). Returns the figure y of the box's
+    lower edge."""
+    lines = code.split("\n")
+    marks = mark_lines(code, marks) if marks else None
     gutter = 1.15 if marks else 0.12                            # inches
     width_in = width * 15 - gutter - 0.15
     fontsize = min(fontsize, width_in * 72 / (0.61 * max(len(line) for line in lines)))
@@ -1112,7 +1136,7 @@ def page_matrix(t):
 def page_code_forward(t):
     left, bottom, width, height = t.content()
     below = code_box(t, left, 0.86, width, code_of(Net.forward), title="tinynet.py: the real code both courses run",
-                     marks={2: "hidden layer", 3: "output"})
+                     marks=FORWARD_MARKS)
     H_, p = NET2_EX.forward(X2)
     rows = [("X", f"{X2.shape[0]} × {X2.shape[1]}", "afternoons × inputs"),
             ("self.W", f"{NET2_EX.W.shape[0]} × {NET2_EX.W.shape[1]}", "hidden neurons × inputs"),
@@ -1141,7 +1165,7 @@ def page_code_forward(t):
 def page_code_backward(t):
     left, bottom, width, height = t.content()
     below = code_box(t, left, 0.86, width, code_of(Net.backprop), title="tinynet.py",
-                     marks={2: "forward", 4: "step 1", 5: "steps 2 + 3", 6: "step 4"})
+                     marks=BACKPROP_MARKS)
     notes = t.axes([left, bottom, width, below - bottom - 0.06])
     notes.axis("off")
     notes.text(0, 0.95, "The slopes have the same shape as the knobs, so they are packed into a Net too.\n"
@@ -1325,7 +1349,7 @@ def deep_check():
 def page_deep_code(t):
     left, bottom, width, height = t.content()
     code_box(t, left, 0.86, width, code_of(deep_slopes), title="backprop_tutor.py", fontsize=12.5,
-             marks={3: "forward", 7: "start", 9: "backward", 10: "knobs", 13: "blame back"})
+             marks=DEEP_MARKS)
     t.write(
         "With more hidden layers nothing new happens. The four steps of every neuron repeat, layer by layer, "
         "from the last to the first:",

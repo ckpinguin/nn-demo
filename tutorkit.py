@@ -4,10 +4,12 @@ The window behind the step-by-step courses nn_tutor.py and backprop_tutor.py.
 Every step is a page: plots on the left, text on the right, Back / Next underneath and a
 progress bar that shows the parts of the course. A course creates a Course, registers its
 pages with @course.step("title") and calls course.run(). Import this module before pyplot.
+A page that needs a slow computation first names it: @course.step("title", prepare=function).
 """
 import argparse
 import re
 import sys
+from collections import namedtuple
 from pathlib import Path
 
 import matplotlib
@@ -117,12 +119,18 @@ def wrap(text, width):
 
 
 # --- The course: a list of pages, grouped into parts ---
+Step = namedtuple("Step", "part title page prepare")     # prepare: None, or the page's slow computation
+
+
 class Course:
-    def __init__(self, title, glossary, sliders, doc):
+    def __init__(self, title, glossary, sliders, doc, *, name):
         """glossary: [(pattern, symbol, meaning, formula, details)], explained under the text of every page
-        that mentions the pattern. sliders: {key: (low, high, start, label, format[, step])} for the shared knobs."""
-        self.title, self.glossary, self.slider_specs, self.doc = title, glossary, sliders, doc
-        self.steps = []                  # (part, title, page)
+        that mentions the pattern. sliders: {key: (low, high, start, label, format[, step])} for the shared knobs.
+        name: a short word for file names, like "nn_tutor"."""
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise ValueError(f"course name {name!r}: use only small letters, digits and _")
+        self.title, self.name, self.glossary, self.slider_specs, self.doc = title, name, glossary, sliders, doc
+        self.steps = []                  # Step(part, title, page, prepare)
         self.parts = []
         self.tutor = None
 
@@ -130,15 +138,17 @@ class Course:
         """All steps registered from now on belong to this part."""
         self.parts.append(name)
 
-    def step(self, title):
+    def step(self, title, prepare=None):
+        """Register a page. prepare: a function without arguments that does the page's slow computation, cached
+        and without plotting. In a window the reader then sees a notice instead of a frozen window."""
         def register(page):
-            self.steps.append((len(self.parts) - 1, title, page))
+            self.steps.append(Step(len(self.parts) - 1, title, page, prepare))
             return page
         return register
 
     def no(self, page):
         """The step number of a page, for references in the text."""
-        return next(i for i, (_, _, p) in enumerate(self.steps) if p is page) + 1
+        return next(i for i, step in enumerate(self.steps) if step.page is page) + 1
 
     def glossary_in(self, text):
         """The glossary entries a text mentions, in order of first appearance."""
@@ -152,22 +162,40 @@ class Course:
         parser.add_argument("--step", type=int, default=1, help="open the course at this step")
         args = parser.parse_args()
 
-        self.tutor = Tutor(self)
         if args.save:
-            out = Path(args.save)
-            out.mkdir(parents=True, exist_ok=True)
-            for i in range(len(self.steps)):
-                self.tutor.show(i)
-                self.tutor.fig.savefig(out / f"step_{i + 1:02d}.png")
-            print(f"saved {len(self.steps)} steps to {out}")
+            self.export(args.save)
+            print(f"saved {len(self.steps)} steps of {self.name} to {args.save}")
         else:
+            self.tutor = Tutor(self, interactive=True)
             self.tutor.show(args.step - 1)
             plt.show()
 
+    def export(self, out_dir):
+        """Save every step as <name>_step_NN.png into out_dir, then remove this course's pages with higher numbers,
+        left over from an earlier, longer version. Other files stay. Returns the saved files."""
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        tutor = Tutor(self)
+        saved = []
+        for i in range(len(self.steps)):
+            tutor.show(i)
+            saved.append(out / f"{self.name}_step_{i + 1:02d}.png")
+            tutor.fig.savefig(saved[-1])
+        plt.close(tutor.fig)
+        own_page = re.compile(rf"{re.escape(self.name)}_step_(\d+)\.png")
+        for path in sorted(out.iterdir()):
+            match = own_page.fullmatch(path.name)
+            if match and int(match.group(1)) > len(self.steps):
+                path.unlink()
+                print(f"removed leftover {path.name}")
+        return saved
+
 
 class Tutor:
-    def __init__(self, course):
+    def __init__(self, course, interactive=False):
+        """interactive: True in a window. A page with a slow computation then shows a notice first."""
         self.course = course
+        self.interactive = interactive
         steps = course.steps
         plt.rcParams.update({"toolbar": "None", "keymap.back": [], "keymap.forward": [], "keymap.home": [],
                              "keymap.save": [], "keymap.quit": [], "keymap.grid": [], "keymap.yscale": [],
@@ -187,7 +215,7 @@ class Tutor:
         # progress bar: one segment per step, a gap between the parts
         self.bar_ax = self.fig.add_axes([0.725, 0.035, 0.17, 0.05])
         self.bar_ax.axis("off")
-        part_of = np.array([part for part, _, _ in steps])
+        part_of = np.array([step.part for step in steps])
         self.bar_x = np.arange(len(steps)) + 0.8 * part_of
         self.bar_ax.set(xlim=(-0.6, self.bar_x[-1] + 0.6), ylim=(-1, 1.6))
         self.bar = self.bar_ax.bar(self.bar_x, 0.9, width=0.8, bottom=-0.45)
@@ -200,10 +228,16 @@ class Tutor:
         self.guess = {key: spec[2] for key, spec in course.slider_specs.items()}   # the reader's knobs, shared by all pages
         self.state = {}                  # anything else a page wants to keep when the reader comes back
         self.owned, self.timers, self.slider_for = [], [], {}
+        self.layout_problems = []        # text of the current page that does not fit, for the check in tests/
         self.index = self.pending = 0
         self.switch = self.fig.canvas.new_timer(interval=1)
         self.switch.single_shot = True
         self.switch.add_callback(lambda: self.show(self.pending))
+        self.prepared = set()            # steps whose slow computation has run
+        self.notice = None               # "Preparing this page", while it runs
+        self.builder = self.fig.canvas.new_timer(interval=50)   # gives the window time to show the notice
+        self.builder.single_shot = True
+        self.builder.add_callback(lambda: self.build(self.index))
 
         self.fig.canvas.mpl_connect("key_press_event", self.on_key)
         self.fig.canvas.mpl_connect("button_press_event", self.on_click)
@@ -220,6 +254,8 @@ class Tutor:
     def show(self, index):
         steps = self.course.steps
         self.index = self.pending = int(np.clip(index, 0, len(steps) - 1))
+        self.builder.stop()                          # a page still waiting to be built is not wanted any more
+        self.hide_notice()
         for timer in self.timers:
             timer.stop()
         for item in self.owned:
@@ -230,21 +266,44 @@ class Tutor:
                 self.disconnect_handlers(item)
                 item.remove()
         self.owned, self.timers, self.slider_for = [], [], {}
+        self.layout_problems = []
         self.hoverable, self.hovered = None, None    # collected again on the next mouse move
         self.popup.set_visible(False)
         self.panel.clear()
         self.panel.axis("off")
 
-        part, title, page = steps[self.index]
+        part, title, _, prepare = steps[self.index]
         self.title.set_text(f"{self.index + 1}.  {title}")
         self.counter.set_text(f"part {part + 1} of {len(self.course.parts)}:  {self.course.parts[part]}"
                               f"     ·     step {self.index + 1} of {len(steps)}   (← → keys)")
-        for i, (segment, (p, _, _)) in enumerate(zip(self.bar, steps)):
-            segment.set_color("#333" if i == self.index else "#9bb7d4" if p == part else "#d5d5d5")
-        in_part = self.bar_x[[i for i, (p, _, _) in enumerate(steps) if p == part]]
+        for i, (segment, step) in enumerate(zip(self.bar, steps)):
+            segment.set_color("#333" if i == self.index else "#9bb7d4" if step.part == part else "#d5d5d5")
+        in_part = self.bar_x[[i for i, step in enumerate(steps) if step.part == part]]
         self.part_label.set(text=f"part {part + 1}", x=in_part.mean())
-        page(self)
+        if prepare and self.index not in self.prepared and self.interactive:
+            # the slow computation runs a moment later, so that the window first shows this notice
+            self.notice = self.fig.text(0.33, 0.5, "Preparing this page …\nthe networks on it are being trained",
+                                        ha="center", va="center", fontsize=15, color="#777", linespacing=1.6)
+            self.builder.start()
+            self.fig.canvas.draw_idle()
+        else:
+            self.build(self.index)
+
+    def build(self, index):
+        """Build the page of a step, after its slow computation if that has not run yet."""
+        step = self.course.steps[index]
+        self.hide_notice()
+        if step.prepare and index not in self.prepared:
+            step.prepare()
+            self.prepared.add(index)
+        self.hoverable, self.hovered = None, None    # the texts may have been collected while the notice was up
+        step.page(self)
         self.fig.canvas.draw_idle()
+
+    def hide_notice(self):
+        if self.notice is not None:
+            self.notice.remove()
+            self.notice = None
 
     def on_key(self, event):
         if event.key in ("right", "pagedown", " ", "enter"):
@@ -431,7 +490,12 @@ class Tutor:
             text = self.panel.text(y=y - pad, va="top", transform=self.panel.transAxes, **kw)
             extent = text.get_window_extent(renderer)
             if extent.x1 > frame.x1 + 12 or extent.x0 < frame.x0 - 12:
-                print(f"note: text panel of step {self.index + 1} is too narrow for: {block[:40]}", file=sys.stderr)
+                self.layout_problem(f"text panel of step {self.index + 1} is too narrow for: {block[:40]}")
             y -= extent.height / frame.height + 2 * pad + 0.022
         if y < floor - 0.02:
-            print(f"note: text panel of step {self.index + 1} overflows", file=sys.stderr)
+            self.layout_problem(f"text panel of step {self.index + 1} overflows")
+
+    def layout_problem(self, message):
+        """Text that does not fit: printed as a note, and kept for the automated check in tests/."""
+        self.layout_problems.append(message)
+        print(f"note: {message}", file=sys.stderr)

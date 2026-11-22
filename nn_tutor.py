@@ -117,7 +117,7 @@ GLOSSARY = [    # (pattern, symbol, meaning, formula, details)
      "data, stopping early or punishing big weights help."),
 ]
 
-course = Course("Neural networks, step by step", GLOSSARY, SLIDERS, __doc__)
+course = Course("Neural networks, step by step", GLOSSARY, SLIDERS, __doc__, name="nn_tutor")
 step, no = course.step, course.no
 
 
@@ -1091,7 +1091,7 @@ def eta_runs():
     return runs
 
 
-@step("The learning rate")
+@step("The learning rate", prepare=eta_runs)
 def page_learning_rate(t):
     runs = eta_runs()
     left, right = t.split(gap=0.07, ratio=0.5)
@@ -1567,7 +1567,7 @@ def hidden_runs():
     return runs
 
 
-@step("How many hidden neurons?")
+@step("How many hidden neurons?", prepare=hidden_runs)
 def page_how_many(t):
     runs = hidden_runs()
     ax = map_axes(t, [0.06, 0.09, 0.4, 0.79], title="The trained network")
@@ -1619,7 +1619,7 @@ def start_runs():
     return [train(Net.random(2, 3, seed), X2, Y, ETA, 3000) for seed in range(12)]
 
 
-@step("Different starts, different results")
+@step("Different starts, different results", prepare=start_runs)
 def page_starts(t):
     nets = start_runs()
     losses = np.array([net.loss(X2, Y) for net in nets])
@@ -1660,7 +1660,7 @@ def overfit_run():
     return history, np.array([h.loss(X2, Y) for h in history]), np.array([h.loss(X2T, YT) for h in history])
 
 
-@step("Too flexible: overfitting")
+@step("Too flexible: overfitting", prepare=overfit_run)
 def page_overfitting(t):
     history, train_losses, test_losses = overfit_run()
     best = int(np.argmin(test_losses))
@@ -1720,7 +1720,7 @@ def sklearn_net():
     return ((p >= 0.5) == YT).mean(), log_loss(p, YT)
 
 
-@step("The honest test")
+@step("The honest test", prepare=sklearn_net)
 def page_test(t):
     ax = map_axes(t, [0.06, 0.09, 0.33, 0.79], title="Test afternoons, never seen in training")
     p_grid = NET2.forward(GX)[1]
